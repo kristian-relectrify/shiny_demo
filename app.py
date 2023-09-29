@@ -207,9 +207,22 @@ def server(input: Inputs, output: Outputs, session: Session):
         color_scale = {"A": "red", "B": "green", "C": "blue"}
 
         # Plot node state
+        first_a, first_b, first_c = True, True, True
         for k, block in enumerate(d_state["block"].unique()):
             block_state_data = d_state[d_state["block"] == block]
+
             for index, row in block_state_data.iterrows():
+                show_legend = False
+                if first_a and row["state"] == "A":
+                    show_legend = True
+                    first_a = False
+                elif first_b and row["state"] == "B":
+                    show_legend = True
+                    first_b = False
+                elif first_c and row["state"] == "C":
+                    show_legend = True
+                    first_c = False
+
                 scatter = go.Scatter(
                     x=[row["start"], row["end"]],
                     y=[row["node"], row["node"]],
@@ -218,8 +231,9 @@ def server(input: Inputs, output: Outputs, session: Session):
                         size=6,
                         color=color_scale[row["state"]],
                     ),
-                    showlegend=False,
+                    showlegend=show_legend,
                     legendgroup=row["state"],
+                    name=row["state"],
                 )
                 fig.add_trace(scatter, row=k + 2, col=1)
                 fig.update_yaxes(gridcolor="rgba(0,0,0,0.2)", row=k + 2, col=1)
