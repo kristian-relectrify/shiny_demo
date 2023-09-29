@@ -12,10 +12,18 @@ app_ui = ui.page_fluid(
     ui.layout_sidebar(
         ui.panel_sidebar(
             ui.input_file(
-                "file1", "Choose CSV File", accept=[".csv", ".log"], multiple=False
+                "file1",
+                "Choose CSV File",
+                accept=[".csv", ".log"],
+                multiple=False,
+                button_label="Upload",
+                width=12,
             ),
-            ui.input_select(
-                "waveforms_to_plot", "Select waveforms to plot", [], multiple=True
+            ui.input_selectize(
+                "waveforms_to_plot",
+                "Select waveforms to plot",
+                choices=[],
+                multiple=True,
             ),
             ui.input_checkbox("normalize", "Normalize", False),
             width=3,
@@ -61,7 +69,6 @@ def server(input: Inputs, output: Outputs, session: Session):
             d_state,
             waveforms_to_plot=input.waveforms_to_plot(),
             normalize=input.normalize(),
-            hide_state=input.hide_state(),
         )
 
     def read_ac_logs_waveforms(
