@@ -43,7 +43,7 @@ def server(input: Inputs, output: Outputs, session: Session):
                 "waveforms_to_plot",
                 label="Select waveforms to plot",
                 choices=d_waveform.columns.to_list()[:-1],
-                selected=None,
+                selected=d_waveform.columns.to_list()[1],
             )
 
     @output
