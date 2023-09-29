@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.subplots as sp
@@ -7,6 +8,7 @@ from shinywidgets import output_widget, render_widget
 from shiny.types import FileInfo
 
 app_ui = ui.page_fluid(
+    ui.panel_title("AC Stack Debug"),
     ui.layout_sidebar(
         ui.panel_sidebar(
             ui.input_file(
@@ -16,8 +18,7 @@ app_ui = ui.page_fluid(
                 "waveforms_to_plot", "Select waveforms to plot", [], multiple=True
             ),
             ui.input_checkbox("normalize", "Normalize", False),
-            ui.input_checkbox("hide_state", "Hide State", False),
-            width=5,
+            width=3,
         ),
         ui.panel_main(ui.output_ui("contents"), output_widget("ac_debug")),
     ),
@@ -29,11 +30,11 @@ def server(input: Inputs, output: Outputs, session: Session):
     def _():
         if input.file1() is not None:
             f: list[FileInfo] = input.file1()
-            a, b = read_ac_logs(f[0]["datapath"])
+            d_waveform = read_ac_logs_waveforms(f[0]["datapath"])
             ui.update_select(
                 "waveforms_to_plot",
                 label="Select waveforms to plot",
-                choices=a.columns.to_list()[:-1],
+                choices=d_waveform.columns.to_list()[:-1],
                 selected=None,
             )
 
@@ -43,8 +44,8 @@ def server(input: Inputs, output: Outputs, session: Session):
         if input.file1() is None:
             return "Please upload a csv file"
         f: list[FileInfo] = input.file1()
-        a, b = read_ac_logs(f[0]["datapath"])
-        df_agg = a.agg(["max", "min"]).T
+        d_waveform = read_ac_logs_waveforms(f[0]["datapath"])
+        df_agg = d_waveform.agg(["max", "min"]).T
         return ui.HTML(df_agg.to_html(classes="table table-striped"))
 
     @output
@@ -53,19 +54,20 @@ def server(input: Inputs, output: Outputs, session: Session):
         if input.file1() is None:
             return go.Figure()
         f: list[FileInfo] = input.file1()
-        a, b = read_ac_logs(f[0]["datapath"])
+        d_waveform = read_ac_logs_waveforms(f[0]["datapath"])
+        d_state = read_ac_logs_state(f[0]["datapath"])
         return plot_ac_logs(
-            a,
-            b,
+            d_waveform,
+            d_state,
             waveforms_to_plot=input.waveforms_to_plot(),
             normalize=input.normalize(),
             hide_state=input.hide_state(),
         )
 
-    def read_ac_logs(f_data: str):
-        """
-        Reads and process waveform and state data from logs
-        """
+    def read_ac_logs_waveforms(
+        f_data: str,  # file path.
+    ) -> pd.DataFrame:  # waveform dataframe
+        """Get waveform data from file"""
         d = pd.read_csv(
             f_data,
             sep=",",
@@ -77,52 +79,85 @@ def server(input: Inputs, output: Outputs, session: Session):
         d_waveform["search_time"] = d_waveform["search_time"]
         d_waveform["time"] = list(range(d_waveform.shape[0]))
 
+        return d_waveform
+
+    def read_ac_logs_state(
+        f_data: str,  # file path.
+    ) -> pd.DataFrame:  # state dataframe
+        """Get state data from file"""
+        d = pd.read_csv(
+            f_data,
+            sep=",",
+        )
+        d.columns = [c.strip() for c in d.columns]
         # extract and process block state data.
-        d_state = process_state_data(d["block_state"])
+        d_state = state_data_to_line(d["block_state"])
         d_state["state"] = pd.Categorical(
             d_state["state"], categories=["A", "B", "C"], ordered=True
         )
 
-        return d_waveform, d_state
+        return d_state
 
-    def process_state_data(d: pd.DataFrame, block_size: int = 8):
-        """
-        Process ac stack beta log files.
+    def parse_state(x) -> list:
+        state_map = {
+            "a": 0,
+            "b": 1,
+            "c": 2,
+        }
+        blocks_state = x.strip()[1:].split("-")
 
-        """
+        switch_state = [s[1:-1].strip().split("|") for s in blocks_state]
+        switch_state_ = []
+        for i in range(len(switch_state)):
+            switch_state_.append([int(state_map[s.lower()]) for s in switch_state[i]])
 
-        def get_state(x):
-            state_map = {
-                "a": 0,
-                "b": 1,
-                "c": 2,
-            }
-            blocks_state = x.strip()[1:].split("-")
+        return switch_state_
 
-            switch_state = [s[1:-1].strip().split("|") for s in blocks_state]
-            switch_state_ = []
-            for i in range(len(switch_state)):
-                switch_state_.append(
-                    [int(state_map[s.lower()]) for s in switch_state[i]]
-                )
+    def state_data_to_line(
+        d: pd.DataFrame,  # raw state data
+    ) -> pd.DataFrame:  # processed state data for point plots
+        """Prepare state data for point plots"""
 
-            return switch_state
+        # extract state data per block
+        block_states = pd.DataFrame(d.apply(parse_state).to_list())
+        n_blocks = block_states.shape[1]
+        state_map_inv = {
+            0: "A",
+            1: "B",
+            2: "C",
+        }
 
-        # reformats data to tidy data.
-        new_df = list()
-        for i, value in enumerate(d.apply(get_state)):
-            for r in range(len(value)):
-                for i_, c in enumerate(value[r]):
-                    new_df.append(
+        # get transition points for each block
+        transition_points = []
+        for i in range(n_blocks):
+            temp_ = pd.DataFrame(block_states[i].to_list())
+            # add final row to capture last transition.
+            temp_ = pd.concat(
+                [temp_, pd.DataFrame(np.ones((1, temp_.shape[1])) * 100)], axis=0
+            ).reset_index(drop=True)
+            transition_points.append(temp_.diff())
+
+        # make a dataframe of all transition points with corresponding state
+        transition_points_ = []
+        for b_, block_transition_points in enumerate(transition_points):
+            block_states_ = block_states[b_]
+
+            for n_ in range(block_transition_points.shape[1]):
+                node_transition_points = block_transition_points[n_]
+                pts = node_transition_points[node_transition_points != 0]
+
+                for p_ in range(len(pts) - 1):
+                    transition_points_.append(
                         {
-                            "time": i,
-                            "block": r,
-                            "index": -block_size * r + -1 * i_,
-                            "state": c,
+                            "block": b_,
+                            "node": -1 * len(block_states_[0]) * b_ + -1 * n_,
+                            "start": pts.index[p_],
+                            "end": pts.index[p_ + 1] - 1,
+                            "state": state_map_inv[block_states_[pts.index[p_]][n_]],
                         }
                     )
 
-        return pd.DataFrame(new_df)
+        return pd.DataFrame(transition_points_)
 
     # Function to plot using Plotly
     def plot_ac_logs(
@@ -130,12 +165,11 @@ def server(input: Inputs, output: Outputs, session: Session):
         d_state: pd.DataFrame,
         waveforms_to_plot: list,
         normalize: bool = False,
-        hide_state: bool = False,
     ):
         """
         Plots waveform and stat data as plotly interactive plots.
         """
-        n_blocks = d_state["block"].nunique() if not hide_state else 0
+        n_blocks = d_state["block"].nunique()
 
         fig = sp.make_subplots(
             rows=1 + n_blocks,
@@ -162,33 +196,29 @@ def server(input: Inputs, output: Outputs, session: Session):
 
         fig.update_yaxes(gridcolor="rgba(0,0,0,0.2)")
 
-        if not hide_state:
-            # Define a color scale for the legend
-            color_scale = {"A": "red", "B": "green", "C": "blue"}
+        # Define a color scale for the legend
+        color_scale = {"A": "red", "B": "green", "C": "blue"}
 
-            # Plot node state
-            for k, block in enumerate(d_state["block"].unique()):
-                state_data = d_state[d_state["block"] == block]
+        # Plot node state
+        for k, block in enumerate(d_state["block"].unique()):
+            block_state_data = d_state[d_state["block"] == block]
+            for index, row in block_state_data.iterrows():
+                scatter = go.Scatter(
+                    x=[row["start"], row["end"]],
+                    y=[row["node"], row["node"]],
+                    mode="lines+markers",
+                    marker=dict(
+                        size=6,
+                        color=color_scale[row["state"]],
+                    ),
+                    showlegend=False,
+                    legendgroup=row["state"],
+                )
+                fig.add_trace(scatter, row=k + 2, col=1)
+                fig.update_yaxes(gridcolor="rgba(0,0,0,0.2)", row=k + 2, col=1)
 
-                for s_ in color_scale.keys():
-                    state_data_ = state_data[state_data["state"] == s_]
-                    scatter = go.Scatter(
-                        x=state_data_["time"],
-                        y=state_data_["index"],
-                        legendgroup=s_,
-                        showlegend=k == 2,
-                        mode="markers",
-                        marker=dict(
-                            size=6,
-                            color=color_scale[s_],
-                        ),
-                        name=s_,  # Unique legend name for each color/state
-                    )
-                    fig.add_trace(scatter, row=k + 2, col=1)
-                    fig.update_yaxes(gridcolor="rgba(0,0,0,0.2)", row=k + 2, col=1)
-
-            fig.update_layout(height=300 + 150 * n_blocks, showlegend=True)
-            fig.update_xaxes(showticklabels=False)
+        fig.update_layout(height=300 + 150 * n_blocks, showlegend=True)
+        fig.update_xaxes(showticklabels=False)
 
         return fig
 
